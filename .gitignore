@@ -1,0 +1,15 @@
+.DS_Store
+.env
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+.idea/
+.vscode/
+~/.cache/whisper/
+code_review.md
