@@ -7,7 +7,7 @@ A Telegram bot that transcribes voice messages and video notes to text using Ope
 - Transcribes Telegram voice and video messages in real time
 - Uses local OpenAI Whisper for quality transcription
 - Handles multiple chats efficiently
-- Single-transcription lock prevents CPU overload
+- Concurrency-limited transcription (max 2 at once) prevents CPU overload
 
 ## Installation
 
