@@ -20,7 +20,8 @@ VERSION = "1.11"
 DATE = "June 21, 2026"
 
 model = whisper.load_model("small")
-transcribe_lock = asyncio.Lock()
+# allowing 2 voice messages at the same time
+transcribe_lock = asyncio.Semaphore(2)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -39,8 +40,13 @@ async def transcribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     suffix = ".ogg" if is_voice else ".mp4"
     media_type = "voice" if is_voice else "video note"
 
-    status_msg = await update.message.reply_text("Working on the voice message…")
     log.info("Got %s: file_id=%s duration=%s", media_type, media.file_id, media.duration)
+
+    if media.file_size and media.file_size > 20 * 1024 * 1024:
+        await update.message.reply_text("This file is larger than 20MB. I cannot download it.")
+        return
+
+    status_msg = await update.message.reply_text("Working on the voice message…")
 
     tg_file = await context.bot.get_file(media.file_id)
     data = await tg_file.download_as_bytearray()
@@ -63,7 +69,7 @@ async def transcribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     except Exception as e:
         log.exception("Failed to process voice")
-        await status_msg.edit_text(f"Error while transcribing: {e}")
+        await status_msg.edit_text("Sorry, an internal error occurred while processing your audio.")
 
     finally:
         if path and os.path.exists(path):
