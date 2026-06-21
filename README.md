@@ -14,8 +14,8 @@ A Telegram bot that transcribes voice messages and video notes to text using Ope
 ### Docker (recommended)
 
 ```bash
-git clone https://github.com/kirooshii/telegram-kharon-bot.git
-cd telegram-kharon-bot
+git clone https://github.com/kirooshii/kharon-bot.git
+cd kharon-bot
 
 # Create .env with your token
 echo 'TELEGRAM_TOKEN=your_bot_token_here' > .env
@@ -26,8 +26,8 @@ docker compose up --build
 ### Without Docker
 
 ```bash
-git clone https://github.com/kirooshii/telegram-kharon-bot.git
-cd telegram-kharon-bot
+git clone https://github.com/kirooshii/kharon-bot.git
+cd kharon-bot
 
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
