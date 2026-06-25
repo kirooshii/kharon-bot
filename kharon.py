@@ -22,10 +22,30 @@ DATE = "June 21, 2026"
 model = whisper.load_model("small")
 # allowing 2 voice messages at the same time
 transcribe_lock = asyncio.Semaphore(2)
+# chat IDs where transcription is paused via /pause
+paused_chats: set[int] = set()
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Hi! I'm Kharon bot. Send me a voice message and I'll transcribe it."
+    )
+
+async def pause(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    was_paused = chat_id in paused_chats
+    paused_chats.add(chat_id)
+    await update.message.reply_text(
+        "I'm already paused for this group" if was_paused
+        else "Paused. Send /resume to wake me up."
+    )
+
+async def resume(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    was_paused = chat_id in paused_chats
+    paused_chats.discard(chat_id)
+    await update.message.reply_text(
+        "Resuming..." if was_paused
+        else "I'm already on!"
     )
 
 async def transcribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -39,6 +59,10 @@ async def transcribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     is_voice = update.message.voice is not None
     suffix = ".ogg" if is_voice else ".mp4"
     media_type = "voice" if is_voice else "video note"
+
+    if update.effective_chat.id in paused_chats:
+        log.info("Skipping %s in paused chat %s", media_type, update.effective_chat.id)
+        return
 
     log.info("Got %s: file_id=%s duration=%s", media_type, media.file_id, media.duration)
 
@@ -79,6 +103,8 @@ def main():
     log.info("Kharon bot is running, version %s dated %s", VERSION, DATE)
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("pause", pause))
+    app.add_handler(CommandHandler("resume", resume))
     app.add_handler(MessageHandler(filters.VOICE, transcribe)) # voice messages
     app.add_handler(MessageHandler(filters.VIDEO_NOTE, transcribe)) # video messages
     app.run_polling()
