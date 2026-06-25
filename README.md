@@ -48,6 +48,8 @@ Send a voice message or video note to your bot on Telegram — it replies with t
 ## Commands
 
 - `/start` — Welcome message
+- `/pause` — Stop transcribing voice/video messages in this chat
+- `/resume` — Resume transcription in this chat
 
 ## Tech Stack
 
