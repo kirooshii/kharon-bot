@@ -1,4 +1,5 @@
 import os
+import sqlite3
 import tempfile
 import asyncio
 import logging
@@ -16,14 +17,43 @@ TOKEN = os.getenv("TELEGRAM_TOKEN")
 if not TOKEN:
     raise RuntimeError("TELEGRAM_TOKEN not set. Check your .env file.")
 
-VERSION = "1.11"
-DATE = "June 21, 2026"
+DB_PATH = os.getenv("KHARON_DB_PATH", "kharon.db")
+
+VERSION = "1.12"
+DATE = "June 27, 2026"
 
 model = whisper.load_model("small")
 # allowing 2 voice messages at the same time
 transcribe_lock = asyncio.Semaphore(2)
-# chat IDs where transcription is paused via /pause
-paused_chats: set[int] = set()
+
+db = sqlite3.connect(DB_PATH, check_same_thread=False)
+db.execute(
+    "CREATE TABLE IF NOT EXISTS paused_chats (chat_id INTEGER PRIMARY KEY)"
+)
+db.commit()
+
+
+def is_paused(chat_id: int) -> bool:
+    row = db.execute(
+        "SELECT 1 FROM paused_chats WHERE chat_id = ?", (chat_id,)
+    ).fetchone()
+    return row is not None
+
+
+def pause_chat(chat_id: int) -> bool:
+    cur = db.execute(
+        "INSERT OR IGNORE INTO paused_chats (chat_id) VALUES (?)", (chat_id,)
+    )
+    db.commit()
+    return cur.rowcount > 0
+
+
+def resume_chat(chat_id: int) -> bool:
+    cur = db.execute(
+        "DELETE FROM paused_chats WHERE chat_id = ?", (chat_id,)
+    )
+    db.commit()
+    return cur.rowcount > 0
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -32,8 +62,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def pause(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    was_paused = chat_id in paused_chats
-    paused_chats.add(chat_id)
+    was_paused = is_paused(chat_id)
+    pause_chat(chat_id)
     await update.message.reply_text(
         "I'm already paused for this group" if was_paused
         else "Paused. Send /resume to wake me up."
@@ -41,8 +71,8 @@ async def pause(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def resume(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    was_paused = chat_id in paused_chats
-    paused_chats.discard(chat_id)
+    was_paused = is_paused(chat_id)
+    resume_chat(chat_id)
     await update.message.reply_text(
         "Resuming..." if was_paused
         else "I'm already on!"
@@ -60,7 +90,7 @@ async def transcribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     suffix = ".ogg" if is_voice else ".mp4"
     media_type = "voice" if is_voice else "video note"
 
-    if update.effective_chat.id in paused_chats:
+    if is_paused(update.effective_chat.id):
         log.info("Skipping %s in paused chat %s", media_type, update.effective_chat.id)
         return
 
