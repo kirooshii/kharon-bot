@@ -1,6 +1,5 @@
---index-url https://download.pytorch.org/whl/cpu
---extra-index-url https://pypi.org/simple
-
-openai-whisper>=20231117
+faster-whisper>=1.1.0
+# faster-whisper passes an argument PyAV 19 removed
+av<19
 python-dotenv>=1.0.0
-python-telegram-bot>=20.0
+python-telegram-bot>=21.0
