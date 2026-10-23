@@ -3,10 +3,15 @@ services:
     build: .
     env_file:
       - .env
+    environment:
+      # outside /app, so the database survives rebuilds
+      KHARON_DB_PATH: /data/kharon.db
     volumes:
       # keep downloaded Whisper models between rebuilds
       - models:/root/.cache/huggingface
+      - data:/data
     restart: unless-stopped
 
 volumes:
   models:
+  data:

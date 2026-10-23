@@ -24,6 +24,8 @@ echo 'TELEGRAM_TOKEN=your_bot_token_here' > .env
 docker compose up --build
 ```
 
+The `/pause` state and downloaded models are kept in Docker volumes (`data` and `models`), so they survive rebuilds. `docker compose down -v` deletes them.
+
 ### Without Docker
 
 ```bash
