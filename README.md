@@ -6,9 +6,10 @@ A Telegram bot that transcribes voice messages and video notes to text using Whi
 
 - Transcribes Telegram voice and video messages in real time
 - Uses local Whisper via [faster-whisper](https://github.com/SYSTRAN/faster-whisper): free, runs on CPU, no audio leaves your server
-- 🔁 Retry button under every transcription — pick the right language if Whisper guessed wrong
+- Transcriptions come in a collapsed quote that expands on tap, so long messages don't flood the chat
+- 🔁 Retry button under every transcription — reruns it with slower, more careful decoding
 - Handles multiple chats efficiently
-- Concurrency-limited transcription (max 2 at once) prevents CPU overload
+- Concurrency-limited transcription (max 2 at once, 1 on a single-core machine) prevents CPU overload
 
 ## Installation
 
@@ -50,7 +51,8 @@ Measured peak RAM / time per short voice message on CPU (int8):
 | `large-v3-turbo` | ~1.6 GB | ~11s | Close to `large-v3` quality |
 | `large-v3` | ~1.8 GB | ~20s | Best quality, slowest |
 
-For reference, the old `openai-whisper` `small` used ~1.4 GB. Up to 2 messages are transcribed at once, so leave some headroom.
+For reference, the old `openai-whisper` `small` used ~1.4 GB. Up to 2 messages are transcribed at once (1 on a single core), so leave some headroom.
+On a small VM (1 CPU, 2 GB RAM) use `small`: `medium` doesn't fit next to the OS and starts swapping, which makes it far slower.
 
 ## Getting a Bot Token
 
@@ -62,8 +64,8 @@ For reference, the old `openai-whisper` `small` used ~1.4 GB. Up to 2 messages a
 
 Send a voice message or video note to your bot on Telegram — it replies with the transcription.
 
-If the result is wrong (e.g. in the wrong language), tap **🔁 Retry** and pick the language the message is actually in.
-The picker shows the languages Whisper found likely; set `RETRY_LANGUAGES=ru,en` in `.env` to always include the languages your chats use.
+The transcription is shown as a quote collapsed to a few lines; tap it to read the rest.
+If the result looks wrong, tap **🔁 Retry**: it transcribes the message again more carefully, which takes about twice as long.
 
 ## Commands
 

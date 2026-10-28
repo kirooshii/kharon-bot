@@ -1,12 +1,15 @@
+import html
 import io
 import os
 import sqlite3
+import time
 import asyncio
 import logging
 
 from faster_whisper import WhisperModel
 from dotenv import load_dotenv
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
+from telegram.constants import ParseMode
 from telegram.error import BadRequest, RetryAfter, TelegramError
 from telegram.ext import (
     Application,
@@ -18,6 +21,8 @@ from telegram.ext import (
 )
 
 logging.basicConfig(level=logging.INFO)
+# httpx logs every request URL, and Telegram's contain the bot token
+logging.getLogger("httpx").setLevel(logging.WARNING)
 log = logging.getLogger("kharon-bot")
 
 load_dotenv()
@@ -27,18 +32,18 @@ if not TOKEN:
 
 DB_PATH = os.getenv("KHARON_DB_PATH", "kharon.db")
 MODEL_NAME = os.getenv("WHISPER_MODEL", "medium")
-# languages always offered when retrying, e.g. "ru,en"
-RETRY_LANGUAGES = [
-    code.strip().lower() for code in os.getenv("RETRY_LANGUAGES", "").split(",") if code.strip()
-]
 
-VERSION = "1.13"
-DATE = "October 23, 2026"
+VERSION = "1.14"
+DATE = "October 29, 2026"
+
+CPU_COUNT = os.cpu_count() or 1
 
 log.info("Loading Whisper model %s (downloads on first run)", MODEL_NAME)
-model = WhisperModel(MODEL_NAME, device="cpu", compute_type="int8")
-# allowing 2 voice messages at the same time
-transcribe_lock = asyncio.Semaphore(2)
+# faster-whisper defaults to 4 threads, which on a small VM just fight over the cores
+model = WhisperModel(MODEL_NAME, device="cpu", compute_type="int8", cpu_threads=CPU_COUNT)
+# allowing 2 voice messages at the same time, 1 on a single core:
+# two jobs there take as long as running them one by one, and need twice the RAM
+transcribe_lock = asyncio.Semaphore(min(2, CPU_COUNT))
 
 ERROR_TEXT = "Sorry, an internal error occurred while processing your audio."
 
@@ -72,38 +77,18 @@ def resume_chat(chat_id: int) -> bool:
     return cur.rowcount > 0
 
 
-# Callback data is stateless (max 64 bytes), the audio is found again through
-# the voice message our reply points to:
-#   retry:<langs>         show the language picker (or rerun right away if no langs)
-#   lang:<code>:<langs>   rerun forcing <code>
-#   back:<langs>          close the picker
-# <langs> is a comma-separated list of the most likely languages, e.g. "ru,uk,en".
-
-def retry_keyboard(langs: list[str]) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [[InlineKeyboardButton("🔁 Retry", callback_data=f"retry:{','.join(langs)}")]]
-    )
+# The Retry button keeps no state, the audio is found again through the
+# voice message our reply points to
+RETRY_KEYBOARD = InlineKeyboardMarkup(
+    [[InlineKeyboardButton("🔁 Retry", callback_data="retry")]]
+)
 
 
-def language_keyboard(langs: list[str]) -> InlineKeyboardMarkup:
-    joined = ",".join(langs)
-    row = [
-        InlineKeyboardButton(code.upper(), callback_data=f"lang:{code}:{joined}")
-        for code in langs
-    ]
-    row.append(InlineKeyboardButton("✖", callback_data=f"back:{joined}"))
-    return InlineKeyboardMarkup([row])
-
-
-async def edit(msg: Message, text: str | None, reply_markup=None):
-    # a failed edit is what leaves a message stuck on "Working…", so retry network errors.
-    # text=None only swaps the keyboard
+async def edit(msg: Message, text: str, reply_markup=None, parse_mode=None):
+    # a failed edit is what leaves a message stuck on "Working…", so retry network errors
     for attempt in range(3):
         try:
-            if text is None:
-                await msg.edit_reply_markup(reply_markup=reply_markup)
-            else:
-                await msg.edit_text(text, reply_markup=reply_markup)
+            await msg.edit_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
             return
         except BadRequest as e:
             # deleted message, or a retried edit that already went through
@@ -118,39 +103,23 @@ async def edit(msg: Message, text: str | None, reply_markup=None):
             await asyncio.sleep(2 ** attempt)
 
 
-def run_whisper(data: bytes, language: str | None):
-    segments, info = model.transcribe(
+def run_whisper(data: bytes, careful: bool) -> str:
+    segments, _ = model.transcribe(
         io.BytesIO(data),
-        language=language,
+        # greedy decoding is about twice as fast as a beam of 5 for a small loss,
+        # but it always gives the same answer, so Retry uses the slower beam search
+        beam_size=5 if careful else 1,
         # skipping silence cuts down on made-up text
         vad_filter=True,
         # keeps one bad guess from derailing the rest of the message
         condition_on_previous_text=False,
     )
     # segments is lazy, the actual work happens while iterating, so do it in this thread
-    text = " ".join(s.text.strip() for s in segments).strip()
-    # only filled when the language was detected, not forced
-    return text, retry_candidates(info.all_language_probs or [])
-
-
-def retry_candidates(probs: list[tuple[str, float]]) -> list[str]:
-    ranked = sorted(probs, key=lambda lp: lp[1], reverse=True)
-    if not ranked:
-        return []
-    # detected language first, then anything plausible, then the configured ones
-    langs = [ranked[0][0]] + [lang for lang, p in ranked if p >= 0.05] + RETRY_LANGUAGES
-    langs = list(dict.fromkeys(langs))  # dedupe, keep order
-    # pad with the next best guesses, even unlikely ones, so there's always a choice
-    for lang, _ in ranked:
-        if len(langs) >= 3:
-            break
-        if lang not in langs:
-            langs.append(lang)
-    return langs[:5]
+    return " ".join(s.text.strip() for s in segments).strip()
 
 
 async def process(status_msg: Message, media, context: ContextTypes.DEFAULT_TYPE,
-                  language: str | None = None, langs: list[str] | None = None):
+                  careful: bool = False):
     # every path through here must end with status_msg edited
     try:
         tg_file = await context.bot.get_file(media.file_id, read_timeout=30)
@@ -159,18 +128,27 @@ async def process(status_msg: Message, media, context: ContextTypes.DEFAULT_TYPE
         # Whisper is CPU-heavy, don't block the asyncio event loop
         async with transcribe_lock:
             loop = asyncio.get_running_loop()
-            text, detected = await loop.run_in_executor(
-                None, run_whisper, bytes(data), language
-            )
+            started = time.monotonic()
+            text = await loop.run_in_executor(None, run_whisper, bytes(data), careful)
+            log.info("Transcribed %s in %.1fs", media.file_id, time.monotonic() - started)
     except Exception:
         log.exception("Failed to process %s", media.file_id)
-        await edit(status_msg, ERROR_TEXT, retry_keyboard(langs or []))
+        await edit(status_msg, ERROR_TEXT, RETRY_KEYBOARD)
         return
 
-    langs = detected or langs or []
+    if not text:
+        await edit(status_msg, "(no speech detected)", RETRY_KEYBOARD)
+        return
+    # the 4096 limit counts the text after formatting, so the tags don't use it up
     if len(text) > 4096:
         text = text[:4093] + "..."
-    await edit(status_msg, text or "(no speech detected)", retry_keyboard(langs))
+    # collapsed to a few lines, expands on tap
+    await edit(
+        status_msg,
+        f"<blockquote expandable>{html.escape(text)}</blockquote>",
+        RETRY_KEYBOARD,
+        ParseMode.HTML,
+    )
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -224,25 +202,9 @@ async def transcribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def retry(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    action, _, rest = query.data.partition(":")
     status_msg = query.message
     if not isinstance(status_msg, Message):
         await query.answer("This message is too old to retry.", show_alert=True)
-        return
-
-    if action == "lang":
-        language, _, rest = rest.partition(":")
-    else:
-        language = None
-    langs = [code for code in rest.split(",") if code]
-
-    if action == "retry" and langs:
-        await query.answer()
-        await edit(status_msg, None, language_keyboard(langs))
-        return
-    if action == "back":
-        await query.answer()
-        await edit(status_msg, None, retry_keyboard(langs))
         return
 
     original = status_msg.reply_to_message
@@ -252,9 +214,9 @@ async def retry(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await query.answer()
-    log.info("Retrying %s with language=%s", media.file_id, language)
-    await edit(status_msg, f"Retrying in {language.upper()}…" if language else "Retrying…")
-    await process(status_msg, media, context, language, langs)
+    log.info("Retrying %s", media.file_id)
+    await edit(status_msg, "Retrying…")
+    await process(status_msg, media, context, careful=True)
 
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
     log.error("Unhandled error", exc_info=context.error)
@@ -268,7 +230,8 @@ def main():
     app.add_handler(CommandHandler("resume", resume))
     app.add_handler(MessageHandler(filters.VOICE, transcribe)) # voice messages
     app.add_handler(MessageHandler(filters.VIDEO_NOTE, transcribe)) # video messages
-    app.add_handler(CallbackQueryHandler(retry, pattern=r"^(retry|lang|back):"))
+    # lang: and back: come from the language picker of 1.13, they now just retry
+    app.add_handler(CallbackQueryHandler(retry, pattern=r"^(retry|lang|back)"))
     app.add_error_handler(on_error)
     app.run_polling()
 
