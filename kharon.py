@@ -51,6 +51,11 @@ db = sqlite3.connect(DB_PATH, check_same_thread=False)
 db.execute(
     "CREATE TABLE IF NOT EXISTS paused_chats (chat_id INTEGER PRIMARY KEY)"
 )
+# replies that were already retried, one retry per voice message
+db.execute(
+    "CREATE TABLE IF NOT EXISTS retried_messages ("
+    "chat_id INTEGER, message_id INTEGER, PRIMARY KEY (chat_id, message_id))"
+)
 db.commit()
 
 
@@ -72,6 +77,17 @@ def pause_chat(chat_id: int) -> bool:
 def resume_chat(chat_id: int) -> bool:
     cur = db.execute(
         "DELETE FROM paused_chats WHERE chat_id = ?", (chat_id,)
+    )
+    db.commit()
+    return cur.rowcount > 0
+
+
+def mark_retried(chat_id: int, message_id: int) -> bool:
+    # False if it was retried before. Check and mark in one step,
+    # so two quick taps can't both get through
+    cur = db.execute(
+        "INSERT OR IGNORE INTO retried_messages (chat_id, message_id) VALUES (?, ?)",
+        (chat_id, message_id),
     )
     db.commit()
     return cur.rowcount > 0
@@ -121,6 +137,8 @@ def run_whisper(data: bytes, careful: bool) -> str:
 async def process(status_msg: Message, media, context: ContextTypes.DEFAULT_TYPE,
                   careful: bool = False):
     # every path through here must end with status_msg edited
+    # a retry is final, so its result gets no button
+    keyboard = None if careful else RETRY_KEYBOARD
     try:
         tg_file = await context.bot.get_file(media.file_id, read_timeout=30)
         data = await tg_file.download_as_bytearray(read_timeout=120)
@@ -133,11 +151,11 @@ async def process(status_msg: Message, media, context: ContextTypes.DEFAULT_TYPE
             log.info("Transcribed %s in %.1fs", media.file_id, time.monotonic() - started)
     except Exception:
         log.exception("Failed to process %s", media.file_id)
-        await edit(status_msg, ERROR_TEXT, RETRY_KEYBOARD)
+        await edit(status_msg, ERROR_TEXT, keyboard)
         return
 
     if not text:
-        await edit(status_msg, "(no speech detected)", RETRY_KEYBOARD)
+        await edit(status_msg, "(no speech detected)", keyboard)
         return
     # the 4096 limit counts the text after formatting, so the tags don't use it up
     if len(text) > 4096:
@@ -146,7 +164,7 @@ async def process(status_msg: Message, media, context: ContextTypes.DEFAULT_TYPE
     await edit(
         status_msg,
         f"<blockquote expandable>{html.escape(text)}</blockquote>",
-        RETRY_KEYBOARD,
+        keyboard,
         ParseMode.HTML,
     )
 
@@ -211,6 +229,10 @@ async def retry(update: Update, context: ContextTypes.DEFAULT_TYPE):
     media = original and (original.voice or original.video_note)
     if not media:
         await query.answer("The original voice message is gone.", show_alert=True)
+        return
+
+    if not mark_retried(status_msg.chat_id, status_msg.message_id):
+        await query.answer("This message was already retried once.", show_alert=True)
         return
 
     await query.answer()

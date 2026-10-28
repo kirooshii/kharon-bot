@@ -7,7 +7,7 @@ A Telegram bot that transcribes voice messages and video notes to text using Whi
 - Transcribes Telegram voice and video messages in real time
 - Uses local Whisper via [faster-whisper](https://github.com/SYSTRAN/faster-whisper): free, runs on CPU, no audio leaves your server
 - Transcriptions come in a collapsed quote that expands on tap, so long messages don't flood the chat
-- 🔁 Retry button under every transcription — reruns it with slower, more careful decoding
+- 🔁 Retry button under every transcription — reruns it once with slower, more careful decoding
 - Handles multiple chats efficiently
 - Concurrency-limited transcription (max 2 at once, 1 on a single-core machine) prevents CPU overload
 
@@ -66,6 +66,7 @@ Send a voice message or video note to your bot on Telegram — it replies with t
 
 The transcription is shown as a quote collapsed to a few lines; tap it to read the rest.
 If the result looks wrong, tap **🔁 Retry**: it transcribes the message again more carefully, which takes about twice as long.
+Each message can be retried once; the button disappears after that.
 
 ## Commands
 
