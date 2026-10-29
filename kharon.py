@@ -100,23 +100,56 @@ RETRY_KEYBOARD = InlineKeyboardMarkup(
 )
 
 
-async def edit(msg: Message, text: str, reply_markup=None, parse_mode=None):
-    # a failed edit is what leaves a message stuck on "Working…", so retry network errors
+# Telegram's limit, counted on the text after formatting, so the quote tags don't use it up
+MAX_MESSAGE = 4096
+
+
+async def telegram_call(make_call, what: str):
+    # a failed edit is what leaves a message stuck on "Working…", so retry network errors.
+    # Returns None if it gave up
     for attempt in range(3):
         try:
-            await msg.edit_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
-            return
+            return await make_call()
         except BadRequest as e:
             # deleted message, or a retried edit that already went through
-            log.warning("Could not edit message %s: %s", msg.message_id, e)
-            return
+            log.warning("Could not %s: %s", what, e)
+            return None
         except RetryAfter as e:
             await asyncio.sleep(e.retry_after)
         except TelegramError:
             if attempt == 2:
-                log.exception("Giving up editing message %s", msg.message_id)
-                return
+                log.exception("Giving up, could not %s", what)
+                return None
             await asyncio.sleep(2 ** attempt)
+
+
+async def edit(msg: Message, text: str, reply_markup=None, parse_mode=None):
+    await telegram_call(
+        lambda: msg.edit_text(text, reply_markup=reply_markup, parse_mode=parse_mode),
+        f"edit message {msg.message_id}",
+    )
+
+
+def quote(text: str) -> str:
+    # collapsed to a few lines, expands on tap
+    return f"<blockquote expandable>{html.escape(text)}</blockquote>"
+
+
+def split_text(text: str) -> list[str]:
+    # cut at the last sentence end that leaves the part at least half full,
+    # else between words, and mid-word only if there's no space at all
+    parts = []
+    while len(text) > MAX_MESSAGE:
+        window = text[:MAX_MESSAGE]
+        cut = max(window.rfind(end) for end in (". ", "! ", "? ", "… ")) + 1
+        if cut < MAX_MESSAGE // 2:
+            cut = window.rfind(" ")
+        if cut <= 0:
+            cut = MAX_MESSAGE
+        parts.append(text[:cut].strip())
+        text = text[cut:].strip()
+    parts.append(text)
+    return parts
 
 
 def run_whisper(data: bytes, careful: bool) -> str:
@@ -157,16 +190,21 @@ async def process(status_msg: Message, media, context: ContextTypes.DEFAULT_TYPE
     if not text:
         await edit(status_msg, "(no speech detected)", keyboard)
         return
-    # the 4096 limit counts the text after formatting, so the tags don't use it up
-    if len(text) > 4096:
-        text = text[:4093] + "..."
-    # collapsed to a few lines, expands on tap
-    await edit(
-        status_msg,
-        f"<blockquote expandable>{html.escape(text)}</blockquote>",
-        keyboard,
-        ParseMode.HTML,
-    )
+    parts = split_text(text)
+    # only a one-message result gets Retry: rerunning a long one would tie up the CPU
+    # for minutes, and its extra parts would need replacing too
+    if len(parts) > 1:
+        keyboard = None
+    await edit(status_msg, quote(parts[0]), keyboard, ParseMode.HTML)
+
+    # the rest go out as a chain of replies, so they stay together in a busy group
+    previous = status_msg
+    for number, part in enumerate(parts[1:], start=2):
+        sent = await telegram_call(
+            lambda: previous.reply_text(quote(part), parse_mode=ParseMode.HTML, do_quote=True),
+            f"send part {number} of {len(parts)} for {media.file_id}",
+        )
+        previous = sent or previous
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
